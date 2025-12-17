@@ -12,7 +12,7 @@ target_link_libraries(my_receiver nvbufsurface cudart)
 ```
 
 ## Usage
-The class returns a `digiview_frame` struct containing the frame data and metadata:
+The class returns a `digiview_frame` struct containing the frame data and metadata, where the frame data is a CUDA pointer:
 
 ```cpp
 struct digiview_frame {
@@ -36,10 +36,7 @@ Here is a simple example of how to use the SVIpcReceiver class:
 int main() {
     int32_t f_idx = 0;
 
-    // CUDA_MALLOC_MANAGED in order to access the frame data on both CPU and GPU
-    // For CPU-only access, use CUDA_MALLOC_HOST
-    // for GPU-only access, use CUDA_MALLOC_DEVICE
-    SVIpcReceiver receiver(CUDA_MALLOC_MANAGED, "/tmp/source_camera_0_socket");
+    SVIpcReceiver receiver("/tmp/source_camera_0_socket");
     if (!receiver.wait_for_sender()) {
         return -1;
     }
@@ -80,9 +77,9 @@ To wrap the SVIpcReceiver class in Python, you can use a library like pybind11 o
 #include <pybind11/pybind11.h>
 #include "sv_ipc_receiver.hpp"
 namespace py = pybind11;
-PYBIND11_MODULE(sv_ipc_receiver, m) {
-    py::class_<SVIpcReceiver>(m, "SVIpcReceiver")
-        .def(py::init<int32_t, const std::string&>())
+PYBIND11_MODULE(sv_ipc_receiver) {
+    py::class_<SVIpcReceiver>("SVIpcReceiver")
+        .def(py::init<const std::string&>())
         .def("wait_for_sender", &SVIpcReceiver::wait_for_sender)
         .def("receive_frame", &SVIpcReceiver::receive_frame)
         .def("cleanup", &SVIpcReceiver::cleanup);
@@ -93,7 +90,7 @@ In python:
 ```python
 from sv_ipc_receiver import SVIpcReceiver
 
-rx = SVIpcReceiver(2, "/tmp/source_camera_0_socket")  # CUDA_MALLOC_MANAGED = 2
+rx = SVIpcReceiver("/tmp/source_camera_0_socket") 
 
 rx.wait_for_sender()
 
