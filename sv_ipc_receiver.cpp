@@ -1,296 +1,220 @@
 #include "sv_ipc_receiver.hpp"
 
-bool SVIpcReceiver::wait_for_sender() {
-    if (socket_fd >= 0) {
-        return true;
-    }
+#include <sys/stat.h>
 
-    socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (socket_fd < 0) {
-        perror("SVIpcReceiver::wait_for_sender: socket");
+// Helper: receive one fd via SCM_RIGHTS
+int SVGpuIpcReceiver::recv_fd() {
+    char buf[CMSG_SPACE(sizeof(int))];
+    char data[1];
+    struct iovec io;
+    io.iov_base = data;
+    io.iov_len = sizeof(data);
+    struct msghdr msg;
+    std::memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+    ssize_t n = recvmsg(socket_fd, &msg, 0);
+    if (n <= 0) {
+        if (n == 0) {
+            printf("SVGpuIpcReceiver::recv_fd: EOF from sender\n");
+        } else {
+            perror("SVGpuIpcReceiver::recv_fd: recvmsg failed");
+        }
+        return -1;
+    }
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        fprintf(stderr, "SVGpuIpcReceiver::recv_fd: invalid control message\n");
+        return -1;
+    }
+    int fd = -1;
+    std::memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    return fd;
+}
+
+// Helper: receive exactly size bytes
+bool SVGpuIpcReceiver::recv_metadata() {
+    char* ptr = reinterpret_cast<char*>(&metadata);
+    size_t remaining = sizeof(metadata);
+    while (remaining > 0) {
+        ssize_t n = recv(socket_fd, ptr, remaining, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            perror("SVGpuIpcReceiver::recv_metadata: recv failed");
+            return false;
+        }
+        if (n == 0) {
+            fprintf(stderr, "SVGpuIpcReceiver::recv_metadata: EOF while reading\n");
+            return false;
+        }
+        ptr += n;
+        remaining -= n;
+    }
+    return true;
+}
+
+bool SVGpuIpcReceiver::send_ack() {
+    strncpy(ack.message, "ACK", sizeof(ack.message));
+    ssize_t n = send(socket_fd, &ack, sizeof(ack), 0);
+    if (n != (ssize_t)sizeof(ack)) {
+        perror("SVGpuIpcReceiver::send_ack: send failed");
         return false;
     }
+    return true;
+}
 
+bool SVGpuIpcReceiver::wait_for_sender() {
+    if (socket_fd >= 0) return true;
+    socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+        perror("SVGpuIpcReceiver::wait_for_sender: socket");
+        return false;
+    }
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
-
-    printf("SVIpcReceiver: Connecting to sender at %s...\n", socket_path.c_str());
-
-    int retry = 0;
-    int ret;
+    int retry = 0, ret;
     do {
-        usleep(200000); // 200 ms
-        ret = connect(socket_fd,
-                      reinterpret_cast<struct sockaddr*>(&addr),
-                      sizeof(addr));
-        if (ret < 0) retry++;
+        ret = connect(socket_fd, (struct sockaddr*)&addr, sizeof(addr));
+        if (ret < 0) { usleep(100000); retry++; }
     } while (ret < 0 && retry < 50);
-
     if (ret < 0) {
-        printf("SVIpcReceiver::wait_for_sender: connect failed: %s\n",
-               strerror(errno));
+        perror("SVGpuIpcReceiver::wait_for_sender: connect");
         close(socket_fd);
         socket_fd = -1;
         return false;
     }
 
-    printf("SVIpcReceiver: Connected to sender.\n");
+    // Initialize CUDA driver & create context (driver API)
+    CUresult cres;
+    const char *errStr = nullptr;
+    cres = cuInit(0);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuInit failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        return false;
+    }
+    CUdevice cuDevice;
+    cres = cuDeviceGet(&cuDevice, 0);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuDeviceGet failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        return false;
+    }
+    printf("SVGpuIpcReceiver: Connected to sender and created CUDA context.\n");
     return true;
 }
 
-bool SVIpcReceiver::receive_frame(digiview_frame &frame) {
-    // Make sure we are connected
-    if (socket_fd < 0) {
-        printf("SVIpcReceiver::receive_frame: not connected\n");
+// Main frame receive logic: fills digiview_frame
+bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
+    int share_fd = recv_fd();
+    if (share_fd < 0) {
         return false;
     }
+    printf("SVGpuIpcReceiver: Received FD %d\n", share_fd);
 
-    // Receive dmabuf fd
-    int dmabuf_fd = recv_fd();
-    if (dmabuf_fd < 0) {
-        printf("SVIpcReceiver: No more frames or error, exiting.\n");
-        return false;
-    }
-
-    // Read metadata header
     if (!recv_metadata()) {
-        printf("SVIpcReceiver::receive_frame: Failed to receive frame header\n");
-        close(dmabuf_fd);
+        close(share_fd);
+        return false;
+    }
+    printf("SVGpuIpcReceiver: Received metadata: ts=%llu, size=%dx%d, flags=%d\n",
+           (unsigned long long)metadata.timestamp, metadata.frame_width, metadata.frame_height, metadata.flags);
+
+    CUmemGenericAllocationHandle handle = 0;
+    CUresult cres;
+    const char* errStr = nullptr;
+    void* osHandle = reinterpret_cast<void*>(static_cast<intptr_t>(share_fd));
+    cres = cuMemImportFromShareableHandle(&handle, osHandle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuMemImportFromShareableHandle failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        close(share_fd);
+        return false;
+    }
+    int width = metadata.frame_width;
+    int height = metadata.frame_height;
+    size_t pixel_size = 3; 
+    size_t frame_bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * pixel_size;
+
+    size_t granularity = 0;
+    CUmemAllocationProp prop{};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = 0;
+    cres = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuMemGetAllocationGranularity failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        return false;
+    }
+    size_t allocSize = ((frame_bytes + granularity - 1) / granularity) * granularity;
+
+    CUdeviceptr devPtr = 0;
+    cres = cuMemAddressReserve(&devPtr, allocSize, granularity, 0, 0);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuMemAddressReserve failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        return false;
+    }
+    cres = cuMemMap(devPtr, allocSize, 0, handle, 0);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuMemMap failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        return false;
+    }
+    CUmemAccessDesc accessDesc{};
+    accessDesc.location = prop.location;
+    accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    cres = cuMemSetAccess(devPtr, allocSize, &accessDesc, 1);
+    if (cres != CUDA_SUCCESS) {
+        cuGetErrorString(cres, &errStr);
+        std::fprintf(stderr, "cuMemSetAccess failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
+        cuMemUnmap(devPtr, allocSize);
         return false;
     }
 
-    // Import NvBufSurface from received fd and parameters
-    NvBufSurface *surf = nullptr;
-    metadata.params.fd = dmabuf_fd;
-
-    if (NvBufSurfaceImport(&surf, &metadata.params) != 0) {
-        printf("SVIpcReceiver::receive_frame: NvBufSurfaceImport failed\n");
-        close(dmabuf_fd);
+    unsigned char* host_buffer = (unsigned char*)malloc(frame_bytes);
+    if (!host_buffer) {
+        std::fprintf(stderr, "SVGpuIpcReceiver::receive_frame: malloc(%zu) failed\n", frame_bytes);
+        cuMemUnmap(devPtr, allocSize);
         return false;
     }
 
-    // Mark buffer as containing 1 valid frame and map it for CPU access
-    surf->numFilled = 1;
-    if (NvBufSurfaceMap(surf, 0, 0, NVBUF_MAP_READ) != 0) {
-        printf("SVIpcReceiver::receive_frame: NvBufSurfaceMap failed\n");
-        NvBufSurfaceDestroy(surf);
+    cudaError_t ce = cudaMemcpy(host_buffer, (void*)devPtr, frame_bytes, cudaMemcpyDeviceToHost);
+    if (ce != cudaSuccess) {
+        std::fprintf(stderr, "SVGpuIpcReceiver::receive_frame: cudaMemcpy failed: %s\n", cudaGetErrorString(ce));
+        free(host_buffer);
+        cuMemUnmap(devPtr, allocSize);
         return false;
     }
+    cuMemUnmap(devPtr, allocSize);
 
-    // Synchronize the buffer for CPU access and take pointer to data
-    NvBufSurfaceSyncForCpu(surf, 0, 0);
-    void* ptr = surf->surfaceList[0].mappedAddr.addr[0];
-    if (!ptr) {
-        printf("SVIpcReceiver::receive_frame: mappedAddr.addr[0] is null\n");
-        NvBufSurfaceUnMap(surf, 0, 0);
-        NvBufSurfaceDestroy(surf);
-        return false;
-    }
-
-    uint8_t* src      = static_cast<uint8_t*>(ptr);
-    uint32_t width    = surf->surfaceList[0].width;
-    uint32_t height   = surf->surfaceList[0].height;
-    uint32_t pitch    = surf->surfaceList[0].pitch;
-
-    size_t buffer_size = static_cast<size_t>(pitch) * height;
-
-    printf("SVIpcReceiver: Received frame: timestamp=%lu, size=%dx%d, pitch=%d, pixel_format=%d\n",
-           metadata.timestamp, width, height, pitch, metadata.params.colorFormat);
-
-    // Allocate frame buffer if not already done
-    if (!copied_frame) {
-        if (!allocate_frame(height, pitch)) {
-            printf("SVIpcReceiver::receive_frame: allocate_frame failed\n");
-            NvBufSurfaceUnMap(surf, 0, 0);
-            NvBufSurfaceDestroy(surf);
-            return false;
-        }
-    }
-
-    // Copy data to allocated frame buffer
-    cudaError_t e;
-    switch (cuda_alloc_type) {
-        case CUDA_MALLOC_HOST:
-            e = cudaMemcpy2D(copied_frame, pitch, src, pitch, pitch, height,
-                cudaMemcpyHostToHost);
-            break;
-        case CUDA_MALLOC_DEVICE:
-            e = cudaMemcpy2D(copied_frame, pitch, src, pitch, pitch, height,
-                cudaMemcpyHostToDevice);
-            break;
-        case CUDA_MALLOC_MANAGED:
-            e = cudaMemcpy2D(copied_frame, pitch, src, pitch, pitch, height,
-                cudaMemcpyHostToHost);
-            break;
-        default:
-            memcpy(copied_frame, src, buffer_size);
-            e = cudaSuccess;
-            break;
-    }
-    if (e != cudaSuccess) {
-        printf("SVIpcReceiver::receive_frame: copy failed: %s\n", cudaGetErrorString(e));
-        NvBufSurfaceUnMap(surf, 0, 0);
-        NvBufSurfaceDestroy(surf);
-        return false;
-    }
-
-    // Unmap and destroy NvBufSurface, close dmabuf fd
-    NvBufSurfaceUnMap(surf, 0, 0);
-    NvBufSurfaceDestroy(surf);
-    surf = nullptr;
-    close(dmabuf_fd);
-
-    // Fill out digiview_frame structure
     frame.timestamp = metadata.timestamp;
     for (int i = 0; i < 3; ++i) {
         frame.acc[i] = metadata.acc[i];
         frame.vel[i] = metadata.vel[i];
         frame.dir[i] = metadata.dir[i];
     }
-    frame.data = copied_frame;
-    frame.width  = static_cast<int32_t>(width);
-    frame.height = static_cast<int32_t>(height);
-    frame.pixel_format = metadata.params.colorFormat;
-    frame.pitch = static_cast<int32_t>(pitch);
+    frame.data = reinterpret_cast<Npp8u*>(host_buffer);
+    frame.width = width;
+    frame.height = height;
+    frame.pixel_format = 0; // assume RGB
+    frame.pitch = static_cast<int32_t>(width * pixel_size);
 
-    // 6) Send ACK back to sender
     if (!send_ack()) {
-        printf("SVIpcReceiver::receive_frame: Failed to send ACK\n");
+        std::fprintf(stderr, "SVGpuIpcReceiver::receive_frame: Failed to send ACK\n");
+        free(host_buffer);
         return false;
     }
+    printf("SVGpuIpcReceiver: Sent ACK for ts=%llu\n", (unsigned long long)metadata.timestamp);
 
     return true;
 }
 
-void SVIpcReceiver::cleanup() {
-    if (socket_fd >= 0) {
-        close(socket_fd);
-        socket_fd = -1;
-    }
-    if (nvbuf_surf) {
-        NvBufSurfaceDestroy(nvbuf_surf);
-        nvbuf_surf = nullptr;
-    }
-    if (copied_frame) {
-        switch (cuda_alloc_type) {
-            case CUDA_MALLOC_HOST:
-                cudaFreeHost(copied_frame);
-                break;
-            case CUDA_MALLOC_DEVICE:
-            case CUDA_MALLOC_MANAGED:
-                cudaFree(copied_frame);
-                break;
-            default:
-                free(copied_frame);
-                break;
-        }
-        copied_frame = nullptr;
-    }
-}
-
-int SVIpcReceiver::recv_fd() {
-    char buf[CMSG_SPACE(sizeof(int))];
-    char data[1]; // dummy payload
-
-    struct iovec io;
-    io.iov_base = data;
-    io.iov_len  = sizeof(data);
-
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov    = &io;
-    msg.msg_iovlen = 1;
-    msg.msg_control    = buf;
-    msg.msg_controllen = sizeof(buf);
-
-    ssize_t n = recvmsg(socket_fd, &msg, 0);
-    if (n <= 0) {
-        if (n == 0) {
-            printf("SVIpcReceiver::recv_fd: EOF from sender\n");
-        } else {
-            printf("SVIpcReceiver::recv_fd: recvmsg failed\n");
-        }
-        return -1;
-    }
-
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (!cmsg ||
-        cmsg->cmsg_level != SOL_SOCKET ||
-        cmsg->cmsg_type  != SCM_RIGHTS) {
-
-        printf("recvFd: invalid control message\n");
-        return -1;
-    }
-
-    int fd = -1;
-    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
-    return fd;
-}
-
-bool SVIpcReceiver::recv_metadata() {
-    char *ptr = reinterpret_cast<char*>(&metadata);
-    size_t remaining = sizeof(metadata);
-
-    while (remaining > 0) {
-        ssize_t n = recv(socket_fd, ptr, remaining, 0);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            printf("SVIpcReceiver::recv_metadata: recv failed\n");
-            return false;
-        }
-        if (n == 0) {
-            printf("SVIpcReceiver::recv_metadata: EOF while reading\n");
-            return false;
-        }
-        ptr       += n;
-        remaining -= n;
-    }
-    return true;
-}
-
-bool SVIpcReceiver::send_ack() {
-    strncpy(ack.message, "ACK", sizeof(ack.message));
-    ssize_t n = send(socket_fd, &ack, sizeof(ack), 0);
-    if (n != sizeof(ack)) {
-        printf("SVIpcReceiver::send_ack: send failed\n");
-        return false;
-    }
-    return true;
-}
-
-bool SVIpcReceiver::allocate_frame(int32_t height, int32_t pitch) {
-    cudaError_t e;
-    switch (cuda_alloc_type) {
-        case CUDA_MALLOC_DEVICE:
-            e = cudaMalloc((void **)&copied_frame, pitch * height);
-            if (e != cudaSuccess) {
-                printf("SVIpcReceiver::allocate_frame: cudaMalloc failed: %s\n", cudaGetErrorString(e));
-                return false;
-            }
-            break;
-        case CUDA_MALLOC_HOST:
-            e = cudaMallocHost((void **)&copied_frame, pitch * height, cudaHostAllocDefault);
-            if (e != cudaSuccess) {
-                printf("SVIpcReceiver::allocate_frame: cudaMallocHost failed: %s\n", cudaGetErrorString(e));
-                return false;
-            }
-            break;
-        case CUDA_MALLOC_MANAGED:
-            e = cudaHostAlloc((void **)&copied_frame, pitch * height, cudaHostAllocMapped);
-            if (e != cudaSuccess) {
-                printf("SVIpcReceiver::allocate_frame: cudaHostAlloc failed: %s\n", cudaGetErrorString(e));
-                return false;
-            }
-            break;
-        default:
-            copied_frame = static_cast<Npp8u*>(malloc(pitch * height));
-            if (!copied_frame) {
-                printf("SVIpcReceiver::allocate_frame: malloc failed\n");
-                return false;
-            }
-            break;
-    }
-    return true;
+void SVGpuIpcReceiver::cleanup() {
+    if (socket_fd >= 0) close(socket_fd);
+    socket_fd = -1;
 }
