@@ -1,5 +1,5 @@
 #pragma once
-
+#include <lodepng.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -10,20 +10,19 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
-
-#include <nvbufsurface.h>
 #include <cuda_runtime.h>
+#include <sys/stat.h>
+#include <cuda.h>
 #include <npp.h>
 
-static constexpr int32_t CUDA_MALLOC_DEVICE  = 0;
-static constexpr int32_t CUDA_MALLOC_HOST    = 1;
-static constexpr int32_t CUDA_MALLOC_MANAGED = 2;
+#include <fcntl.h>
+#include <iostream>
 
 struct digiview_frame {
     uint64_t timestamp = 0;
-    float    acc[3] = {0, 0, 0}; // the frame's acceleration vector in the global frame
-    float    vel[3] = {0, 0, 0}; // the frame's velocity vector in the global frame
-    float    dir[3] = {0, 0, 0}; // the frame's direction vector in the global frame
+    float    acc[3] = {0, 0, 0};
+    float    vel[3] = {0, 0, 0};
+    float    dir[3] = {0, 0, 0};
     Npp8u   *data = nullptr;
     int32_t  width = 0;
     int32_t  height = 0;
@@ -31,40 +30,37 @@ struct digiview_frame {
     int32_t  pitch = 0;
 };
 
-class SVIpcReceiver {
-    public:
-        SVIpcReceiver(int32_t cuda_alloc_type = CUDA_MALLOC_DEVICE, std::string socket_path = "/tmp/source_camera_0_socket")
-            : cuda_alloc_type(cuda_alloc_type), socket_path(socket_path) {}
-        ~SVIpcReceiver() {}
 
-        bool wait_for_sender();
-        bool receive_frame(digiview_frame &frame);
-        void cleanup();
+class SVGpuIpcReceiver {
+public:
+    SVGpuIpcReceiver(std::string socket_path = "/tmp/source_camera_0_socket")
+        : socket_path(socket_path) {}
+    ~SVGpuIpcReceiver() {}
 
-    private:
-        int recv_fd();
-        bool recv_metadata();
-        bool send_ack();
-        bool allocate_frame(int32_t height, int32_t pitch);
+    bool wait_for_sender();
+    bool receive_frame(digiview_frame &frame);
+    void cleanup();
 
-        // Make sure this matches the sender-side wire header layout exactly
-        struct digiview_metadata {
-            uint8_t               start_byte = 0xFF;
-            uint64_t              timestamp;
-            float                 acc[3];
-            float                 vel[3];
-            float                 dir[3];
-            NvBufSurfaceMapParams params;
-            int32_t               flags; // e.g. last frame
-        } metadata;
+private:
+    int recv_fd();
+    bool recv_metadata();
+    bool send_ack();
 
-        struct acknowledgment {
-            char message[16];
-        } ack;
+    struct digiview_metadata {
+        uint8_t  start_byte = 0xFF;
+        uint64_t timestamp;
+        float    acc[3];
+        float    vel[3];
+        float    dir[3];
+        int32_t  frame_width;
+        int32_t  frame_height;
+        int32_t  flags;
+    }metadata;
 
-        std::string socket_path;
-        int socket_fd = -1;
-        NvBufSurface *nvbuf_surf = nullptr;
-        Npp8u *copied_frame = nullptr;
-        int32_t cuda_alloc_type = 0;
+    struct acknowledgment {
+        char message[16] = {0};
+    }ack;
+
+    std::string socket_path;
+    int socket_fd = -1;
 };
