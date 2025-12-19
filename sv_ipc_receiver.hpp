@@ -23,11 +23,11 @@ struct digiview_frame {
     float    acc[3] = {0, 0, 0};
     float    vel[3] = {0, 0, 0};
     float    dir[3] = {0, 0, 0};
-    float    system_coordinate[2]; 
-    float    system_altitude; 
-    float    home_altitude;
-    float    auto_pilot_euler[3]; 
-    float    auto_pilot_acc[3];
+    float    system_coordinate[2] = {0, 0}; 
+    float    system_altitude = 0; 
+    float    home_altitude = 0; 
+    float    auto_pilot_euler[3] = {0, 0, 0}; 
+    float    auto_pilot_acc[3] = {0, 0, 0};
     Npp8u   *data = nullptr;
     int32_t  width = 0;
     int32_t  height = 0;
