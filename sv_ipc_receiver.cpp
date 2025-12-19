@@ -193,10 +193,16 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
     cuMemUnmap(devPtr, allocSize);
 
     frame.timestamp = metadata.timestamp;
+    frame.system_coordinate[0] = metadata.system_coordinate[0];
+    frame.system_coordinate[1] = metadata.system_coordinate[1];
+    frame.system_altitude = metadata.system_altitude;
+    frame.home_altitude = metadata.home_altitude;
     for (int i = 0; i < 3; ++i) {
         frame.acc[i] = metadata.acc[i];
         frame.vel[i] = metadata.vel[i];
         frame.dir[i] = metadata.dir[i];
+        frame.auto_pilot_euler[i] = metadata.auto_pilot_euler[i];
+        frame.auto_pilot_acc[i] = metadata.auto_pilot_acc[i];
     }
     frame.data = reinterpret_cast<Npp8u*>(host_buffer);
     frame.width = width;
