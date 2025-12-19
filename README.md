@@ -20,7 +20,12 @@ struct digiview_frame {
     float    acc[3] = {0, 0, 0}; // the frame's acceleration vector in the global frame
     float    vel[3] = {0, 0, 0}; // the frame's velocity vector in the global frame
     float    dir[3] = {0, 0, 0}; // the frame's direction vector in the global frame
-    Npp8u   *data = nullptr;
+    float    system_coordinate[2] = {0, 0}; 
+    float    system_altitude = 0; 
+    float    home_altitude = 0; 
+    float    auto_pilot_euler[3] = {0, 0, 0}; 
+    float    auto_pilot_acc[3] = {0, 0, 0};
+    Npp8u    *data = nullptr;
     int32_t  width = 0;
     int32_t  height = 0;
     int32_t  pixel_format = -1;
@@ -55,10 +60,16 @@ int main() {
         printf("  Acceleration: [%f, %f, %f]\n", frame.acc[0], frame.acc[1], frame.acc[2]);
         printf("  Velocity: [%f, %f, %f]\n", frame.vel[0], frame.vel[1], frame.vel[2]);
         printf("  Direction: [%f, %f, %f]\n", frame.dir[0], frame.dir[1], frame.dir[2]);
+        printf("  System Coordinate: [%f, %f]\n", frame.system_coordinate[0], frame.system_coordinate[1]);
+        printf("  System Altitude: %f\n", frame.system_altitude);
+        printf("  Home Altitude: %f\n", frame.home_altitude);
+        printf("  Auto Pilot Euler: [%f, %f, %f]\n", frame.auto_pilot_euler[0], frame.auto_pilot_euler[1], frame.auto_pilot_euler[2]);
+        printf("  Auto Pilot Acc: [%f, %f, %f]\n", frame.auto_pilot_acc[0], frame.auto_pilot_acc[1], frame.auto_pilot_acc[2]);
         printf("  Width: %d\n", frame.width);
         printf("  Height: %d\n", frame.height);
         printf("  Pixel Format: %d\n", frame.pixel_format);
         printf("  Pitch: %d\n", frame.pitch);
+        printf("  Data pointer: %p\n", (void*)frame.data);
         
         f_idx++;
 
