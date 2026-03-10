@@ -41,7 +41,7 @@ Here is a simple example of how to use the SVIpcReceiver class:
 int main() {
     int32_t f_idx = 0;
 
-    SVIpcReceiver receiver("/tmp/source_camera_0_socket");
+    SVIpcReceiver receiver("/tmp/source_camera_0_socket0");
     if (!receiver.wait_for_sender()) {
         return -1;
     }
