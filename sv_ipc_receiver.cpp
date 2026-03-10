@@ -92,7 +92,7 @@ bool SVGpuIpcReceiver::wait_for_sender() {
     CUresult cres;
     const char *errStr = nullptr;
     cres = cuInit(0);
-    if (cres != CUDA_SUCCESS) {
+     != CUDA_SUCCESS) {
         cuGetErrorString(cres, &errStr);
         std::fprintf(stderr, "cuInit failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
         return false;
@@ -128,10 +128,11 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
     const char* errStr = nullptr;
     void* osHandle = reinterpret_cast<void*>(static_cast<intptr_t>(share_fd));
     cres = cuMemImportFromShareableHandle(&handle, osHandle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+    // Close the FD immediately after import - the handle is now internal to CUDA
+    close(share_fd);
     if (cres != CUDA_SUCCESS) {
         cuGetErrorString(cres, &errStr);
         std::fprintf(stderr, "cuMemImportFromShareableHandle failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
-        close(share_fd);
         return false;
     }
     int width = metadata.frame_width;
@@ -188,9 +189,14 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
         std::fprintf(stderr, "SVGpuIpcReceiver::receive_frame: cudaMemcpy failed: %s\n", cudaGetErrorString(ce));
         free(host_buffer);
         cuMemUnmap(devPtr, allocSize);
+        cuMemAddressFree(devPtr, allocSize);
+        cuMemRelease(handle);
         return false;
     }
+    // Unmap and release
     cuMemUnmap(devPtr, allocSize);
+    cuMemAddressFree(devPtr, allocSize);
+    cuMemRelease(handle);
 
     frame.timestamp = metadata.timestamp;
     frame.system_coordinate[0] = metadata.system_coordinate[0];
