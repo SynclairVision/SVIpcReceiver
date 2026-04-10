@@ -1,5 +1,4 @@
 #pragma once
-#include <lodepng.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>

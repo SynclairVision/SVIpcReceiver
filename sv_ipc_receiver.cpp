@@ -92,7 +92,7 @@ bool SVGpuIpcReceiver::wait_for_sender() {
     CUresult cres;
     const char *errStr = nullptr;
     cres = cuInit(0);
-     != CUDA_SUCCESS) {
+    if (cres != CUDA_SUCCESS) {
         cuGetErrorString(cres, &errStr);
         std::fprintf(stderr, "cuInit failed: %d (%s)\n", cres, errStr ? errStr : "unknown");
         return false;
