@@ -114,14 +114,11 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
     if (share_fd < 0) {
         return false;
     }
-    printf("SVGpuIpcReceiver: Received FD %d\n", share_fd);
 
     if (!recv_metadata()) {
         close(share_fd);
         return false;
     }
-    printf("SVGpuIpcReceiver: Received metadata: ts=%llu, size=%dx%d, flags=%d\n",
-           (unsigned long long)metadata.timestamp, metadata.frame_width, metadata.frame_height, metadata.flags);
 
     CUmemGenericAllocationHandle handle = 0;
     CUresult cres;
@@ -221,7 +218,6 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
         free(host_buffer);
         return false;
     }
-    printf("SVGpuIpcReceiver: Sent ACK for ts=%llu\n", (unsigned long long)metadata.timestamp);
 
     return true;
 }
