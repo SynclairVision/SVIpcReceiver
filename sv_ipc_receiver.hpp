@@ -47,6 +47,8 @@ public:
 
 private:
     void logf(const char *format, ...) const;
+    bool open_log_file();
+    void close_log_file();
     int recv_fd();
     bool recv_metadata();
     bool send_ack();
@@ -72,5 +74,8 @@ private:
     }ack;
 
     std::string socket_path;
+    std::string log_path = "~/svipc.log";
+    std::string expanded_log_path;
+    FILE *log_file = nullptr;
     int socket_fd = -1;
 };

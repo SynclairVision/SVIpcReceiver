@@ -5,12 +5,71 @@
 #include <memory>
 #include <sys/stat.h>
 
+bool SVGpuIpcReceiver::open_log_file() {
+    if (log_file != nullptr) {
+        return true;
+    }
+
+    expanded_log_path = log_path;
+    if (!expanded_log_path.empty() && expanded_log_path.front() == '~') {
+        const char *home = std::getenv("HOME");
+        if (home == nullptr || home[0] == '\0') {
+            std::fprintf(
+                stderr,
+                "SVGpuIpcReceiver[%s]: file logging disabled: HOME is not set for %s\n",
+                socket_path.c_str(),
+                log_path.c_str());
+            return false;
+        }
+        if (expanded_log_path.size() == 1) {
+            expanded_log_path = home;
+        } else if (expanded_log_path[1] == '/') {
+            expanded_log_path = std::string(home) + expanded_log_path.substr(1);
+        } else {
+            std::fprintf(
+                stderr,
+                "SVGpuIpcReceiver[%s]: file logging disabled: unsupported path %s\n",
+                socket_path.c_str(),
+                log_path.c_str());
+            return false;
+        }
+    }
+
+    log_file = std::fopen(expanded_log_path.c_str(), "a");
+    if (log_file == nullptr) {
+        const int saved_errno = errno;
+        std::fprintf(
+            stderr,
+            "SVGpuIpcReceiver[%s]: file logging disabled: fopen(%s) failed: %s (%d)\n",
+            socket_path.c_str(),
+            expanded_log_path.c_str(),
+            std::strerror(saved_errno),
+            saved_errno);
+        return false;
+    }
+
+    return true;
+}
+
+void SVGpuIpcReceiver::close_log_file() {
+    if (log_file == nullptr) {
+        return;
+    }
+
+    FILE *file = log_file;
+    log_file = nullptr;
+    std::fclose(file);
+}
+
 void SVGpuIpcReceiver::logf(const char *format, ...) const {
+    FILE *const output = log_file != nullptr ? log_file : stderr;
+
     std::va_list args;
     va_start(args, format);
-    std::fprintf(stderr, "SVGpuIpcReceiver[%s]: ", socket_path.c_str());
-    std::vfprintf(stderr, format, args);
-    std::fputc('\n', stderr);
+    std::fprintf(output, "SVGpuIpcReceiver[%s]: ", socket_path.c_str());
+    std::vfprintf(output, format, args);
+    std::fputc('\n', output);
+    std::fflush(output);
     va_end(args);
 }
 
@@ -122,6 +181,8 @@ bool SVGpuIpcReceiver::send_ack() {
 }
 
 bool SVGpuIpcReceiver::wait_for_sender() {
+    open_log_file();
+
     if (socket_fd >= 0) {
         logf("wait_for_sender: already connected on socket fd=%d", socket_fd);
         return true;
@@ -413,17 +474,16 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
 }
 
 void SVGpuIpcReceiver::cleanup() {
-    if (socket_fd < 0) {
-        return;
+    if (socket_fd >= 0) {
+        const int fd = socket_fd;
+        socket_fd = -1;
+        if (close(fd) != 0) {
+            const int saved_errno = errno;
+            logf("cleanup: close(%d) failed: %s (%d)", fd, std::strerror(saved_errno), saved_errno);
+        } else {
+            logf("cleanup: closed socket fd=%d", fd);
+        }
     }
 
-    const int fd = socket_fd;
-    socket_fd = -1;
-    if (close(fd) != 0) {
-        const int saved_errno = errno;
-        logf("cleanup: close(%d) failed: %s (%d)", fd, std::strerror(saved_errno), saved_errno);
-        return;
-    }
-
-    logf("cleanup: closed socket fd=%d", fd);
+    close_log_file();
 }
