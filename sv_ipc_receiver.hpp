@@ -39,13 +39,14 @@ class SVGpuIpcReceiver {
 public:
     SVGpuIpcReceiver(std::string socket_path = "/tmp/source_camera_0_socket")
         : socket_path(socket_path) {}
-    ~SVGpuIpcReceiver() {}
+    ~SVGpuIpcReceiver() { cleanup(); }
 
     bool wait_for_sender();
     bool receive_frame(digiview_frame &frame);
     void cleanup();
 
 private:
+    void logf(const char *format, ...) const;
     int recv_fd();
     bool recv_metadata();
     bool send_ack();
