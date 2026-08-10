@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <iostream>
 
+#include <digiview_commons/ipc_wire_structs.hpp>
+
 struct digiview_frame {
     uint64_t timestamp = 0;
     float    acc[3] = {0, 0, 0};
@@ -30,7 +32,7 @@ struct digiview_frame {
     Npp8u   *data = nullptr;
     int32_t  width = 0;
     int32_t  height = 0;
-    int32_t  pixel_format = -1;
+    int32_t  pixel_format = -1; // ipc::GpuFramePixelFormat underlying value
     int32_t  pitch = 0;
 };
 
@@ -42,6 +44,7 @@ public:
     ~SVGpuIpcReceiver() { cleanup(); }
 
     bool wait_for_sender();
+    // On success, the caller owns frame.data and must release it with std::free.
     bool receive_frame(digiview_frame &frame);
     void cleanup();
 
@@ -53,25 +56,8 @@ private:
     bool recv_metadata();
     bool send_ack();
 
-    struct digiview_metadata {
-        uint8_t  start_byte = 0xFF;
-        uint64_t timestamp;
-        float    acc[3];
-        float    vel[3];
-        float    dir[3];
-        float    system_coordinate[2]; 
-        float    system_altitude; 
-        float    home_altitude; 
-        float    auto_pilot_euler[3]; 
-        float    auto_pilot_acc[3]; 
-        int32_t  frame_width;
-        int32_t  frame_height;
-        int32_t  flags;
-    }metadata;
-
-    struct acknowledgment {
-        char message[16] = {0};
-    }ack;
+    digiview_metadata metadata{};
+    acknowledgment ack{};
 
     std::string socket_path;
     std::string log_path = "~/svipc.log";

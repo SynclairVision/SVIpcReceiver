@@ -92,13 +92,14 @@ int SVGpuIpcReceiver::recv_fd() {
     msg.msg_iovlen = 1;
     msg.msg_control = buf;
     msg.msg_controllen = sizeof(buf);
-    ssize_t n = recvmsg(socket_fd, &msg, 0);
+    const ssize_t n = recvmsg(socket_fd, &msg, 0);
     if (n <= 0) {
         if (n == 0) {
             logf("recv_fd: EOF from sender while waiting for shared fd");
         } else {
             const int saved_errno = errno;
             logf("recv_fd: recvmsg failed: %s (%d)", std::strerror(saved_errno), saved_errno);
+            errno = saved_errno;
         }
         return -1;
     }
@@ -138,18 +139,15 @@ bool SVGpuIpcReceiver::recv_metadata() {
     char* ptr = reinterpret_cast<char*>(&metadata);
     size_t remaining = sizeof(metadata);
     while (remaining > 0) {
-        ssize_t n = recv(socket_fd, ptr, remaining, 0);
+        const ssize_t n = recv(socket_fd, ptr, remaining, 0);
         if (n < 0) {
-            if (errno == EINTR) {
-                logf("recv_metadata: recv interrupted, retrying with %zu bytes remaining", remaining);
-                continue;
-            }
             const int saved_errno = errno;
             logf(
                 "recv_metadata: recv failed with %zu bytes remaining: %s (%d)",
                 remaining,
                 std::strerror(saved_errno),
                 saved_errno);
+            errno = saved_errno;
             return false;
         }
         if (n == 0) {
@@ -193,6 +191,7 @@ bool SVGpuIpcReceiver::wait_for_sender() {
     if (socket_fd < 0) {
         const int saved_errno = errno;
         logf("wait_for_sender: socket creation failed: %s (%d)", std::strerror(saved_errno), saved_errno);
+        errno = saved_errno;
         return false;
     }
 
@@ -209,28 +208,31 @@ bool SVGpuIpcReceiver::wait_for_sender() {
     }
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
-    int retry = 0, ret;
+    size_t retry = 0;
     logf("wait_for_sender: attempting to connect");
-    do {
-        ret = connect(socket_fd, (struct sockaddr*)&addr, sizeof(addr));
-        if (ret < 0) {
-            const int saved_errno = errno;
-            ++retry;
-            logf(
-                "wait_for_sender: connect attempt %d/50 failed: %s (%d)",
-                retry,
-                std::strerror(saved_errno),
-                saved_errno);
-            if (retry < 50) {
-                usleep(100000);
-            }
-        }
-    } while (ret < 0 && retry < 50);
-    if (ret < 0) {
+    while (connect(socket_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         const int saved_errno = errno;
-        logf("wait_for_sender: giving up after %d attempts: %s (%d)", retry, std::strerror(saved_errno), saved_errno);
-        cleanup();
-        return false;
+        ++retry;
+        logf(
+            "wait_for_sender: connect attempt %zu failed: %s (%d)",
+            retry,
+            std::strerror(saved_errno),
+            saved_errno);
+        if (saved_errno == EINTR) {
+            cleanup();
+            errno = saved_errno;
+            return false;
+        }
+        if (usleep(100000) != 0 && errno == EINTR) {
+            const int interrupted_errno = errno;
+            logf(
+                "wait_for_sender: retry delay interrupted: %s (%d)",
+                std::strerror(interrupted_errno),
+                interrupted_errno);
+            cleanup();
+            errno = interrupted_errno;
+            return false;
+        }
     }
 
     logf("wait_for_sender: connected on socket fd=%d", socket_fd);
@@ -285,12 +287,39 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
     }
 
     if (metadata.start_byte != 0xFF) {
-        logf("receive_frame: suspicious metadata start byte 0x%02X", metadata.start_byte);
+        logf("receive_frame: rejecting invalid metadata start byte 0x%02X", metadata.start_byte);
+        if (close(share_fd) != 0) {
+            const int saved_errno = errno;
+            logf(
+                "receive_frame: close(%d) after invalid metadata failed: %s (%d)",
+                share_fd,
+                std::strerror(saved_errno),
+                saved_errno);
+        }
+        return false;
     }
 
+    const auto pixel_format = ipc::gpu_frame_pixel_format_from_flags(metadata.flags);
+    if (pixel_format != ipc::GpuFramePixelFormat::kBgr8 &&
+        pixel_format != ipc::GpuFramePixelFormat::kBgra8) {
+        logf(
+            "receive_frame: rejecting unsupported GPU frame format flags=0x%08X%s",
+            static_cast<unsigned int>(metadata.flags),
+            metadata.flags == 0 ? " (legacy or unspecified)" : "");
+        if (close(share_fd) != 0) {
+            const int saved_errno = errno;
+            logf(
+                "receive_frame: close(%d) after unsupported format failed: %s (%d)",
+                share_fd,
+                std::strerror(saved_errno),
+                saved_errno);
+        }
+        return false;
+    }
+
+    const size_t pixel_size = ipc::gpu_frame_bytes_per_pixel(pixel_format);
     const int width = metadata.frame_width;
     const int height = metadata.frame_height;
-    constexpr size_t pixel_size = 3;
     if (width <= 0 || height <= 0) {
         logf("receive_frame: invalid frame dimensions width=%d height=%d", width, height);
         if (close(share_fd) != 0) {
@@ -378,6 +407,14 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
             break;
         }
 
+        if (granularity == 0 ||
+            frame_bytes > std::numeric_limits<size_t>::max() - (granularity - 1)) {
+            logf(
+                "receive_frame: allocation size overflow for frame_bytes=%zu granularity=%zu",
+                frame_bytes,
+                granularity);
+            break;
+        }
         allocSize = ((frame_bytes + granularity - 1) / granularity) * granularity;
 
         cres = cuMemAddressReserve(&devPtr, allocSize, granularity, 0, 0);
@@ -437,7 +474,7 @@ bool SVGpuIpcReceiver::receive_frame(digiview_frame &frame) {
         frame.data = reinterpret_cast<Npp8u*>(host_buffer.release());
         frame.width = width;
         frame.height = height;
-        frame.pixel_format = 0; // assume RGB
+        frame.pixel_format = static_cast<int32_t>(pixel_format);
         frame.pitch = static_cast<int32_t>(width_size * pixel_size);
 
         success = true;

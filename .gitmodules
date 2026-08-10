@@ -1,0 +1,3 @@
+[submodule "digiview_commons"]
+	path = digiview_commons
+	url = git@github.com:SynclairVision/digiview_commons.git
