@@ -17,7 +17,7 @@
 
 namespace {
 
-const char kDefaultSocketPath[] = "/tmp/source_camera_0_socket";
+const char kDefaultSocketPath[] = "/tmp/source_camera_0_socket0";
 volatile std::sig_atomic_t g_interrupted = 0;
 
 struct Options {

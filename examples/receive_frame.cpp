@@ -9,11 +9,11 @@ int main(int argc, char *argv[]) {
     if (argc > 2) {
         std::cerr << "Usage: " << argv[0]
                   << " [socket-path]\n"
-                     "Default socket path: /tmp/source_camera_0_socket\n";
+                      "Default socket path: /tmp/source_camera_0_socket0\n";
         return EXIT_FAILURE;
     }
 
-    const std::string socket_path = argc == 2 ? argv[1] : "/tmp/source_camera_0_socket";
+    const std::string socket_path = argc == 2 ? argv[1] : "/tmp/source_camera_0_socket0";
     SVGpuIpcReceiver receiver(socket_path);
     if (!receiver.wait_for_sender()) {
         std::cerr << "Unable to connect to a compatible DigiView sender at "

@@ -9,7 +9,7 @@ import sys
 import zlib
 
 
-DEFAULT_SOCKET_PATH = "/tmp/source_camera_0_socket"
+DEFAULT_SOCKET_PATH = "/tmp/source_camera_0_socket0"
 BRIDGE_LIBRARY_NAME = "libsv_ipc_receiver_test_bridge.so"
 STATUS_OK = 0
 PIXEL_FORMAT_BGR8 = 1

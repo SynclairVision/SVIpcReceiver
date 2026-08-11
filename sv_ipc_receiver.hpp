@@ -39,7 +39,7 @@ struct digiview_frame {
 
 class SVGpuIpcReceiver {
 public:
-    SVGpuIpcReceiver(std::string socket_path = "/tmp/source_camera_0_socket")
+    SVGpuIpcReceiver(std::string socket_path = "/tmp/source_camera_0_socket0")
         : socket_path(socket_path) {}
     ~SVGpuIpcReceiver() { cleanup(); }
 

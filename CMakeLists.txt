@@ -26,15 +26,26 @@ target_link_libraries(sv_ipc_receiver
 
 set_target_properties(sv_ipc_receiver PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-find_package(ZLIB REQUIRED)
+option(SV_IPC_RECEIVER_BUILD_EXAMPLE "Build the receive_frame example" OFF)
+if(SV_IPC_RECEIVER_BUILD_EXAMPLE)
+    add_executable(receive_frame_example examples/receive_frame.cpp)
+    target_link_libraries(receive_frame_example
+        PRIVATE
+            SVIpcReceiver::sv_ipc_receiver)
+endif()
 
-add_executable(test test.cpp)
-target_link_libraries(test
-    PRIVATE
-        SVIpcReceiver::sv_ipc_receiver
-        ZLIB::ZLIB)
+option(SV_IPC_RECEIVER_BUILD_TEST_TOOLS "Build receiver test and C ABI bridge tools" OFF)
+if(SV_IPC_RECEIVER_BUILD_TEST_TOOLS)
+    find_package(ZLIB REQUIRED)
 
-add_library(sv_ipc_receiver_test_bridge SHARED sv_ipc_receiver_test_bridge.cpp)
-target_link_libraries(sv_ipc_receiver_test_bridge
-    PRIVATE
-        SVIpcReceiver::sv_ipc_receiver)
+    add_executable(sv_ipc_receiver_test test.cpp)
+    target_link_libraries(sv_ipc_receiver_test
+        PRIVATE
+            SVIpcReceiver::sv_ipc_receiver
+            ZLIB::ZLIB)
+
+    add_library(sv_ipc_receiver_test_bridge SHARED sv_ipc_receiver_test_bridge.cpp)
+    target_link_libraries(sv_ipc_receiver_test_bridge
+        PRIVATE
+            SVIpcReceiver::sv_ipc_receiver)
+endif()
