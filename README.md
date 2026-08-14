@@ -27,6 +27,24 @@ The test utility continuously prints frame metadata until interrupted.
 `./build/sv_ipc_receiver_test --frame N` also writes zero-based frame `N` as
 `frame_N.png`.
 
+## NVUNIXFD consumer (Jetson NX only)
+
+`SVGpuIpcReceiver` supports only the CUDA IPC protocol. Consume DigiView
+NVUNIXFD output through NVIDIA GStreamer. It requires Jetson NVMM and the NVIDIA
+DeepStream `nvunixfdsrc` plugin; preflight the plugin with:
+
+```sh
+gst-inspect-1.0 nvunixfdsrc
+```
+
+Enable one processed DigiView pipeline with `ipc_frame_write=0` and
+`nvunixfd_output=true`. That pipeline provides one endpoint for one supported
+logical consumer. Receive one frame with:
+
+```sh
+timeout --foreground 10s gst-launch-1.0 -v nvunixfdsrc socket-path="/tmp/<pipeline-name>_nvunixfd_socket" buffer-timestamp-copy=true num-buffers=1 ! fakesink sync=false
+```
+
 ## Use from C++
 
 Add the repository as a subdirectory and link the namespaced target:
